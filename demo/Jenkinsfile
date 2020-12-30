@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+    tools {
+        maven 'maven3'
+    }
+    options {
+      gitLabConnection('gitlab@hqq')
+      gitlabBuilds(builds: ['build', 'test', 'deploy'])
+    }
+    triggers {
+        gitlab(
+            triggerOnPush: true,
+            triggerOnMergeRequest: true,
+            branchFilterType: 'All',
+            addNoteOnMergeRequest: true,
+            addCiMessage: true
+        )
+    }
+
+
+
+    stages {
+        stage('build') {
+            steps {
+                updateGitlabCommitStatus name: 'build', state: 'running'
+
+                script {
+                    try {
+                        sh 'mvn -B -DskipTests clean package'
+
+                        updateGitlabCommitStatus name: 'build', state: 'success'
+                    } catch (error) {
+                        updateGitlabCommitStatus name: 'build', state: 'failed'
+                        updateGitlabCommitStatus name: 'test', state: 'canceled'
+                        updateGitlabCommitStatus name: 'deploy', state: 'canceled'
+                        error "build failed"
+                    }
+                }
+            }
+        }
+        stage('deploy') {
+            steps {
+                updateGitlabCommitStatus name: 'deploy', state: 'running'
+
+                script {
+
+                    try {
+                        sh 'docker build -t $image:$tag .'
+                        sh 'docker push $image:$tag'
+
+						def server = [:]
+						server.name = 'remote'
+						server.host = "$dhost"
+						server.user = "$duser"
+						server.port = 22
+						server.password = "$dpwd"
+						server.allowAnyHosts = true
+
+						try{
+							sshCommand remote: server, command: "docker stop $service"
+							sshCommand remote: server, command: "docker rm $service"
+						}catch(error){
+
+						}
+                        sshCommand remote: server, command: "docker pull $image:$tag"
+                        sshCommand remote: server, command: "docker run -d --restart always $dockeropts \
+                                                             -e TZ=Asia/Shanghai \
+                                                             -e JAVA_OPTS=\"$javaopts\" \
+                                                             --name $service $image:$tag"
+
+
+                        updateGitlabCommitStatus name: 'deploy', state: 'success'
+                    } catch (error) {
+                        updateGitlabCommitStatus name: 'deploy', state: 'failed'
+                        error "deploy failed"
+                    }
+                }
+            }
+        }
+    }
+}
